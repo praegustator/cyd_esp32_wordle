@@ -105,6 +105,7 @@ enum class KeyType : uint8_t {
     InspectorClose,
     InspectorClear,
     ResetStats,
+    ShowCredits,
     ToggleLanguage,
     ChooseWordle,
     ChooseFibble,
@@ -174,6 +175,7 @@ uint8_t inspectorRow = 0;
 GameSnapshot snapshots[3] = {};
 ModeStats stats[2][3] = {};  // per language, per mode
 bool resetArmed = false;
+bool creditsOpen = false;
 Preferences preferences;
 bool touchArmed = true;
 uint32_t lastTouchMs = 0;
@@ -734,6 +736,7 @@ void renderModeMenu() {
     modeSelected = false;
     gameOver = false;
     inspectorOpen = false;
+    creditsOpen = false;
     tft.fillScreen(COLOR_BACKGROUND);
     drawTitleTiles(16, 26, 4, false);
     drawCenteredText("CHOOSE A GAME MODE", SCREEN_WIDTH / 2, 60, 1, COLOR_TEXT_DIM);
@@ -742,6 +745,8 @@ void renderModeMenu() {
     resetArmed = false;
     tft.fillRoundRect(46, 0, 54, 13, 3, COLOR_PANEL);
     drawCenteredText("RESET", 73, 7, 1, COLOR_TEXT_DIM);
+    tft.fillRoundRect(104, 0, 44, 13, 3, COLOR_PANEL);
+    drawCenteredText("INFO", 126, 7, 1, COLOR_TEXT_DIM);
 
     struct ModeCard {
         const char* name;
@@ -793,6 +798,20 @@ void renderModeMenu() {
 }
 
 // --- Pause / resume and persistent statistics ---
+
+void renderCreditsPage() {
+    tft.fillScreen(COLOR_BACKGROUND);
+    drawTitleTiles(92, 14, 5, false);
+    drawCenteredText("Wordle, Fibble & Don't Wordle", SCREEN_WIDTH / 2, 52, 1, COLOR_TEXT);
+    drawCenteredText("for the ESP32 Cheap Yellow Display", SCREEN_WIDTH / 2, 66, 1, COLOR_TEXT_DIM);
+    drawCenteredText("MIT License (c) 2026 praegustator", SCREEN_WIDTH / 2, 90, 1, COLOR_TEXT);
+    drawCenteredText("CREDITS", SCREEN_WIDTH / 2, 114, 1, COLOR_ACCENT);
+    drawCenteredText("Cyrillic glyphs: Terminus font, SIL OFL 1.1", SCREEN_WIDTH / 2, 130, 1, COLOR_TEXT_DIM);
+    drawCenteredText("EN words: tabatkins/wordle-list, MIT", SCREEN_WIDTH / 2, 144, 1, COLOR_TEXT_DIM);
+    drawCenteredText("RU words: mediahope/Wordle-Russian-Dictionary", SCREEN_WIDTH / 2, 158, 1, COLOR_TEXT_DIM);
+    drawCenteredText("Built with TFT_eSPI, XPT2046, NimBLE-Arduino", SCREEN_WIDTH / 2, 172, 1, COLOR_TEXT_DIM);
+    drawCenteredText("Tap anywhere to return", SCREEN_WIDTH / 2, 210, 1, COLOR_TEXT);
+}
 
 void saveCurrentGame() {
     if (!modeSelected) {
@@ -1239,11 +1258,17 @@ void startRandomDontWordleGuess() {
 
 KeyHit hitTest(int16_t x, int16_t y) {
     if (!modeSelected) {
+        if (creditsOpen) {
+            return {KeyType::ShowCredits, '\0', 0, 0};
+        }
         if (x < 44 && y < 15) {
             return {KeyType::ToggleLanguage, '\0', 0, 0};
         }
         if (x >= 46 && x < 100 && y < 15) {
             return {KeyType::ResetStats, '\0', 0, 0};
+        }
+        if (x >= 104 && x < 148 && y < 15) {
+            return {KeyType::ShowCredits, '\0', 0, 0};
         }
         if (y >= 78 && y < 136) {
             // Tapping the NEW GAME strip of an in-progress card discards the
@@ -1400,6 +1425,14 @@ void handleInput(const KeyHit& hit) {
             }
             resetStats();
             renderModeMenu();
+            break;
+        case KeyType::ShowCredits:
+            if (creditsOpen) {
+                renderModeMenu();
+            } else {
+                creditsOpen = true;
+                renderCreditsPage();
+            }
             break;
         case KeyType::Undo:
             undoDontWordleGuess();
