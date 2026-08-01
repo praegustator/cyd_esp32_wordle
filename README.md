@@ -1,6 +1,15 @@
 # CYD Wordle, Fibble, and Don't Wordle
 
-A self-contained, touch-driven Wordle, Fibble, and Don't Wordle game for the common ESP32-2432S028R Cheap Yellow Display: ESP32, 320x240 ILI9341 TFT, and XPT2046 resistive touch controller.
+A self-contained, touch-driven [Wordle](https://www.nytimes.com/games/wordle/index.html), [Fibble](https://fibble.xyz/), and [Don't Wordle](https://dontwordle.com/) games for the common ESP32-2432S028R Cheap Yellow Display: ESP32, 320x240 ILI9341 TFT, and XPT2046 resistive touch controller.
+
+<img width="1200" height="949" alt="image" src="https://github.com/user-attachments/assets/3be7a4b9-c30b-464b-b721-c4a96c66c72d" />
+
+<img width="1200" height="889" alt="image" src="https://github.com/user-attachments/assets/211f8634-1fc7-4252-852d-13da08538444" />
+
+<img width="1200" height="910" alt="image" src="https://github.com/user-attachments/assets/f67da6f6-b8e8-4a2a-b190-67bde1c73338" />
+
+<img width="1200" height="910" alt="image" src="https://github.com/user-attachments/assets/22260ba0-2b4e-427f-b9c2-ff60292d3c42" />
+
 
 ## Build
 
