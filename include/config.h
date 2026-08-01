@@ -11,6 +11,11 @@ static constexpr uint8_t TFT_ROTATION = 1;
 static constexpr uint8_t TFT_BACKLIGHT_PIN = 21;
 static constexpr bool TFT_BACKLIGHT_ON = HIGH;
 
+// Backlight dims after this idle period; any touch or key wakes it again.
+static constexpr uint32_t BACKLIGHT_DIM_AFTER_MS = 60000;
+static constexpr uint8_t BACKLIGHT_DIM_LEVEL = 25;    // PWM duty 0-255 while idle
+static constexpr uint8_t BACKLIGHT_FULL_LEVEL = 255;  // PWM duty 0-255 while active
+
 static constexpr uint8_t TOUCH_SCLK_PIN = 25;
 static constexpr uint8_t TOUCH_MISO_PIN = 39;
 static constexpr uint8_t TOUCH_MOSI_PIN = 32;

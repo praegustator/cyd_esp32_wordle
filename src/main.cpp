@@ -106,6 +106,7 @@ enum class KeyType : uint8_t {
     InspectorClear,
     ResetStats,
     ShowCredits,
+    ToggleHard,
     ToggleLanguage,
     ChooseWordle,
     ChooseFibble,
@@ -136,6 +137,8 @@ struct GameSnapshot {
     uint8_t undosRemaining;
     size_t validWordsRemaining;
     uint32_t elapsedMs;
+    bool daily;
+    uint16_t dailyNumber;
 };
 
 // Lifetime statistics per mode, persisted in NVS flash.
@@ -143,6 +146,9 @@ struct ModeStats {
     uint32_t played;
     uint32_t wins;
     uint32_t totalWinMs;
+    uint32_t currentStreak;
+    uint32_t bestStreak;
+    uint32_t dist[9];  // wins by number of guesses used
 };
 
 TFT_eSPI tft;
@@ -176,6 +182,12 @@ GameSnapshot snapshots[3] = {};
 ModeStats stats[2][3] = {};  // per language, per mode
 bool resetArmed = false;
 bool creditsOpen = false;
+bool hardMode = false;
+bool dailyGame = false;
+uint16_t dailyNumber = 0;
+uint32_t dailyCounter[2] = {1, 1};  // next daily puzzle number per language
+uint32_t lastInteractionMs = 0;
+bool backlightDimmed = false;
 Preferences preferences;
 bool touchArmed = true;
 uint32_t lastTouchMs = 0;
@@ -683,6 +695,30 @@ void pollTopStatus() {
     renderTopStatus();
 }
 
+// --- Backlight power management ---
+
+void setBacklight(uint8_t level) {
+    ledcWrite(0, TFT_BACKLIGHT_ON == HIGH ? level : 255 - level);
+}
+
+// Returns true when the input woke a dimmed screen and should be swallowed.
+bool wakeBacklight() {
+    lastInteractionMs = millis();
+    if (!backlightDimmed) {
+        return false;
+    }
+    backlightDimmed = false;
+    setBacklight(BACKLIGHT_FULL_LEVEL);
+    return true;
+}
+
+void pollBacklight() {
+    if (!backlightDimmed && millis() - lastInteractionMs >= BACKLIGHT_DIM_AFTER_MS) {
+        backlightDimmed = true;
+        setBacklight(BACKLIGHT_DIM_LEVEL);
+    }
+}
+
 void renderEndPanel(bool won) {
     tft.fillRect(0, KEYBOARD_Y, SCREEN_WIDTH, SCREEN_HEIGHT - KEYBOARD_Y, COLOR_BACKGROUND);
     // Reveal the answer as a row of mini tiles.
@@ -695,10 +731,29 @@ void renderEndPanel(bool won) {
         drawLetterCentered(answer[i], x + miniSize / 2, 150 + miniSize / 2 + 1, 1, 1);
         x += miniSize + miniGap;
     }
-    tft.fillRoundRect(34, 174, 120, 38, 6, COLOR_ACCENT);
-    drawCenteredText("NEW GAME", 94, 193, 2);
-    tft.fillRoundRect(166, 174, 120, 38, 6, COLOR_KEY);
-    drawCenteredText("MODES", 226, 193, 2);
+    // Guess distribution: wins by number of guesses used (not for Don't Wordle,
+    // where every win takes exactly six guesses).
+    if (gameMode != GameMode::DontWordle) {
+        const ModeStats& modeStats =
+            stats[static_cast<uint8_t>(language)][static_cast<uint8_t>(gameMode)];
+        const uint8_t slots = maximumGuesses();
+        const int16_t columnWidth = 30;
+        const int16_t x0 = (SCREEN_WIDTH - slots * columnWidth) / 2;
+        for (uint8_t i = 0; i < slots; ++i) {
+            const bool thisWin = won && i == currentRow;
+            char text[12];
+            snprintf(text, sizeof(text), "%u", i + 1);
+            drawCenteredText(text, x0 + i * columnWidth + columnWidth / 2, 174, 1,
+                             thisWin ? COLOR_CORRECT : COLOR_TEXT_DIM);
+            snprintf(text, sizeof(text), "%u", static_cast<unsigned>(modeStats.dist[i]));
+            drawCenteredText(text, x0 + i * columnWidth + columnWidth / 2, 186, 1,
+                             thisWin ? COLOR_CORRECT : COLOR_TEXT);
+        }
+    }
+    tft.fillRoundRect(34, 196, 120, 36, 6, COLOR_ACCENT);
+    drawCenteredText("NEW GAME", 94, 214, 2);
+    tft.fillRoundRect(166, 196, 120, 36, 6, COLOR_KEY);
+    drawCenteredText("MODES", 226, 214, 2);
     drawCenteredText(won ? "Nice! Play again?" : "Better luck next time",
                      SCREEN_WIDTH / 2, 224, 1, COLOR_TEXT_DIM);
 }
@@ -747,6 +802,9 @@ void renderModeMenu() {
     drawCenteredText("RESET", 73, 7, 1, COLOR_TEXT_DIM);
     tft.fillRoundRect(104, 0, 44, 13, 3, COLOR_PANEL);
     drawCenteredText("INFO", 126, 7, 1, COLOR_TEXT_DIM);
+    tft.fillRoundRect(152, 0, 60, 13, 3, hardMode ? COLOR_ACCENT : COLOR_PANEL);
+    drawCenteredText(hardMode ? "HARD ON" : "HARD OFF", 182, 7, 1,
+                     hardMode ? COLOR_TEXT : COLOR_TEXT_DIM);
 
     struct ModeCard {
         const char* name;
@@ -768,17 +826,25 @@ void renderModeMenu() {
             drawCenteredText("IN PROGRESS", x + 48, 106, 1, COLOR_CORRECT);
             tft.fillRoundRect(x + 6, 114, 84, 14, 3, COLOR_KEY);
             drawCenteredText("NEW GAME", x + 48, 121, 1);
+        } else if (i == 0) {
+            // The Wordle card offers the shared deterministic daily puzzle.
+            drawCenteredText(cards[i].line1, x + 48, 106, 1, COLOR_TEXT_DIM);
+            char dailyLabel[16];
+            snprintf(dailyLabel, sizeof(dailyLabel), "DAILY #%u",
+                     static_cast<unsigned>(dailyCounter[static_cast<uint8_t>(language)]));
+            tft.fillRoundRect(x + 6, 114, 84, 14, 3, COLOR_ACCENT);
+            drawCenteredText(dailyLabel, x + 48, 121, 1);
         } else {
             drawCenteredText(cards[i].line1, x + 48, 108, 1, COLOR_TEXT_DIM);
             drawCenteredText(cards[i].line2, x + 48, 121, 1, COLOR_TEXT_DIM);
         }
 
-        char line[20];
+        char line[24];
         const ModeStats& modeStats = stats[static_cast<uint8_t>(language)][i];
         snprintf(line, sizeof(line), "P:%u  W:%u",
                  static_cast<unsigned>(modeStats.played),
                  static_cast<unsigned>(modeStats.wins));
-        drawCenteredText(line, x + 48, 142, 1, COLOR_TEXT_DIM);
+        drawCenteredText(line, x + 48, 140, 1, COLOR_TEXT_DIM);
         if (modeStats.wins > 0) {
             const uint32_t averageSeconds = modeStats.totalWinMs / modeStats.wins / 1000;
             snprintf(line, sizeof(line), "avg %u:%02u",
@@ -787,13 +853,17 @@ void renderModeMenu() {
         } else {
             snprintf(line, sizeof(line), "avg -:--");
         }
-        drawCenteredText(line, x + 48, 155, 1, COLOR_TEXT_DIM);
+        drawCenteredText(line, x + 48, 152, 1, COLOR_TEXT_DIM);
+        snprintf(line, sizeof(line), "stk %u best %u",
+                 static_cast<unsigned>(modeStats.currentStreak),
+                 static_cast<unsigned>(modeStats.bestStreak));
+        drawCenteredText(line, x + 48, 164, 1, COLOR_TEXT_DIM);
     }
-    drawCenteredText("Touchscreen or BLE keyboard", SCREEN_WIDTH / 2, 175, 1, COLOR_TEXT_DIM);
+    drawCenteredText("Touchscreen or BLE keyboard", SCREEN_WIDTH / 2, 180, 1, COLOR_TEXT_DIM);
     drawCenteredText(language == Language::Russian ?
                          "Russian words - tap RU to switch" :
                          "English words - tap EN to switch",
-                     SCREEN_WIDTH / 2, 190, 1, COLOR_TEXT_DIM);
+                     SCREEN_WIDTH / 2, 194, 1, COLOR_TEXT_DIM);
     renderTopStatus(true);
 }
 
@@ -837,6 +907,8 @@ void saveCurrentGame() {
     snap.undosRemaining = undosRemaining;
     snap.validWordsRemaining = validWordsRemaining;
     snap.elapsedMs = millis() - gameStartedMs;
+    snap.daily = dailyGame;
+    snap.dailyNumber = dailyNumber;
 }
 
 void resumeGame() {
@@ -859,6 +931,8 @@ void resumeGame() {
     currentRow = snap.currentRow;
     undosRemaining = snap.undosRemaining;
     validWordsRemaining = snap.validWordsRemaining;
+    dailyGame = snap.daily;
+    dailyNumber = snap.dailyNumber;
     modeSelected = true;
     gameOver = false;
     inspectorOpen = false;
@@ -879,6 +953,9 @@ void loadStats() {
     preferences.begin("cydwordle", false);
     language = preferences.getUChar("lang", 0) == 1 ? Language::Russian : Language::English;
     applyLanguage();
+    hardMode = preferences.getUChar("hard", 0) == 1;
+    dailyCounter[0] = preferences.getUInt("day0", 1);
+    dailyCounter[1] = preferences.getUInt("day1", 1);
     for (uint8_t lang = 0; lang < 2; ++lang) {
         for (uint8_t i = 0; i < 3; ++i) {
             char key[6];
@@ -896,6 +973,12 @@ void loadStats() {
             snprintf(key, sizeof(key), "t%u%u", lang, i);
             stats[lang][i].totalWinMs =
                 preferences.getUInt(key, lang == 0 ? preferences.getUInt(legacy, 0) : 0);
+            snprintf(key, sizeof(key), "s%u%u", lang, i);
+            stats[lang][i].currentStreak = preferences.getUInt(key, 0);
+            snprintf(key, sizeof(key), "b%u%u", lang, i);
+            stats[lang][i].bestStreak = preferences.getUInt(key, 0);
+            snprintf(key, sizeof(key), "d%u%u", lang, i);
+            preferences.getBytes(key, stats[lang][i].dist, sizeof(stats[lang][i].dist));
         }
     }
 }
@@ -908,6 +991,15 @@ void recordGameResult(bool won) {
     if (won) {
         ++modeStats.wins;
         modeStats.totalWinMs += gameElapsedMs;
+        ++modeStats.currentStreak;
+        if (modeStats.currentStreak > modeStats.bestStreak) {
+            modeStats.bestStreak = modeStats.currentStreak;
+        }
+        if (gameMode != GameMode::DontWordle && currentRow < 9) {
+            ++modeStats.dist[currentRow];
+        }
+    } else {
+        modeStats.currentStreak = 0;
     }
     char key[6];
     snprintf(key, sizeof(key), "p%u%u", lang, mode);
@@ -916,22 +1008,28 @@ void recordGameResult(bool won) {
     preferences.putUInt(key, modeStats.wins);
     snprintf(key, sizeof(key), "t%u%u", lang, mode);
     preferences.putUInt(key, modeStats.totalWinMs);
+    snprintf(key, sizeof(key), "s%u%u", lang, mode);
+    preferences.putUInt(key, modeStats.currentStreak);
+    snprintf(key, sizeof(key), "b%u%u", lang, mode);
+    preferences.putUInt(key, modeStats.bestStreak);
+    snprintf(key, sizeof(key), "d%u%u", lang, mode);
+    preferences.putBytes(key, modeStats.dist, sizeof(modeStats.dist));
 }
 
 void resetStats() {
     const uint8_t lang = static_cast<uint8_t>(language);
     for (uint8_t mode = 0; mode < 3; ++mode) {
         stats[lang][mode] = {};
-        char key[6];
-        snprintf(key, sizeof(key), "p%u%u", lang, mode);
-        preferences.remove(key);
-        snprintf(key, sizeof(key), "w%u%u", lang, mode);
-        preferences.remove(key);
-        snprintf(key, sizeof(key), "t%u%u", lang, mode);
-        preferences.remove(key);
+        static const char prefixes[] = {'p', 'w', 't', 's', 'b', 'd'};
+        for (char prefix : prefixes) {
+            char key[6];
+            snprintf(key, sizeof(key), "%c%u%u", prefix, lang, mode);
+            preferences.remove(key);
+        }
         if (lang == 0) {
             // Also drop the pre-language keys so they cannot resurrect
             // the English stats through the loadStats() fallback.
+            char key[6];
             snprintf(key, sizeof(key), "p%u", mode);
             preferences.remove(key);
             snprintf(key, sizeof(key), "w%u", mode);
@@ -1097,6 +1195,17 @@ void startNewGame() {
     gameElapsedMs = 0;
 
     copyProgmemWord(activeAnswers, esp_random() % activeAnswerCount, answer);
+    if (dailyGame && gameMode == GameMode::Wordle) {
+        // Deterministic answer so every device shows the same daily puzzle.
+        uint32_t seed = dailyNumber * 2654435761u ^
+                        (static_cast<uint32_t>(language) * 0x9E3779B9u);
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        copyProgmemWord(activeAnswers, seed % activeAnswerCount, answer);
+    } else {
+        dailyGame = false;
+    }
     if (gameMode == GameMode::Fibble) {
         seedFibbleGuess();
     }
@@ -1105,9 +1214,17 @@ void startNewGame() {
     renderTopStatus(true);
     renderGrid();
     renderDontWordleDashboard();
-    showStatus(gameMode == GameMode::Fibble ? "One clue lies in every row" :
-               gameMode == GameMode::DontWordle ? "Avoid the hidden word" :
-                                                   "Enter a five-letter word");
+    if (dailyGame) {
+        char dailyMessage[32];
+        snprintf(dailyMessage, sizeof(dailyMessage), "Daily puzzle #%u",
+                 static_cast<unsigned>(dailyNumber));
+        showStatus(dailyMessage);
+    } else {
+        showStatus(gameMode == GameMode::Fibble ? "One clue lies in every row" :
+                   gameMode == GameMode::DontWordle ? "Avoid the hidden word" :
+                   hardMode ? "Hard mode: reuse revealed hints" :
+                              "Enter a five-letter word");
+    }
     renderKeyboard();
 
     if (SERIAL_DEBUG) {
@@ -1120,6 +1237,13 @@ void finishGame(bool won) {
     gameOver = true;
     snapshots[static_cast<uint8_t>(gameMode)].active = false;
     recordGameResult(won);
+    if (dailyGame) {
+        // Advance to the next daily puzzle once this one is finished.
+        const uint8_t lang = static_cast<uint8_t>(language);
+        dailyCounter[lang] = dailyNumber + 1;
+        preferences.putUInt(lang == 0 ? "day0" : "day1", dailyCounter[lang]);
+        dailyGame = false;
+    }
     renderTopStatus(true);
     if (gameMode == GameMode::Fibble) {
         memset(annotations, 0, sizeof(annotations));
@@ -1168,6 +1292,27 @@ void submitGuess() {
         showStatus("Guess breaks known clues", COLOR_PRESENT);
         debugGame("Rejected clue-breaking guess");
         return;
+    }
+    if (gameMode == GameMode::Wordle && hardMode) {
+        // Hard mode: every revealed hint must be reused. Greens must stay in
+        // place; yellows must appear somewhere in the new guess.
+        for (uint8_t row = 0; row < currentRow; ++row) {
+            for (uint8_t column = 0; column < 5; ++column) {
+                const char letter = guesses[row][column];
+                if (marks[row][column] == Mark::Correct &&
+                    currentGuess[column] != letter) {
+                    animateShakeRow(currentRow);
+                    showStatus("Hard mode: keep green letters in place", COLOR_PRESENT);
+                    return;
+                }
+                if (marks[row][column] == Mark::Present &&
+                    memchr(currentGuess, letter, 5) == nullptr) {
+                    animateShakeRow(currentRow);
+                    showStatus("Hard mode: reuse all yellow letters", COLOR_PRESENT);
+                    return;
+                }
+            }
+        }
     }
 
     memcpy(guesses[currentRow], currentGuess, 6);
@@ -1270,6 +1415,9 @@ KeyHit hitTest(int16_t x, int16_t y) {
         if (x >= 104 && x < 148 && y < 15) {
             return {KeyType::ShowCredits, '\0', 0, 0};
         }
+        if (x >= 152 && x < 212 && y < 15) {
+            return {KeyType::ToggleHard, '\0', 0, 0};
+        }
         if (y >= 78 && y < 136) {
             // Tapping the NEW GAME strip of an in-progress card discards the
             // paused game (row = 1) instead of resuming it.
@@ -1321,9 +1469,9 @@ KeyHit hitTest(int16_t x, int16_t y) {
         return {currentRow == 0 ? KeyType::RandomStart : KeyType::Undo, '\0', 0, 0};
     }
     if (gameOver) {
-        if (x >= 34 && x < 154 && y >= 174 && y < 212)
+        if (x >= 34 && x < 154 && y >= 196 && y < 232)
             return {KeyType::NewGame, '\0', 0, 0};
-        if (x >= 166 && x < 286 && y >= 174 && y < 212)
+        if (x >= 166 && x < 286 && y >= 196 && y < 232)
             return {KeyType::ModeMenu, '\0', 0, 0};
         return {KeyType::None, '\0', 0, 0};
     }
@@ -1434,6 +1582,11 @@ void handleInput(const KeyHit& hit) {
                 renderCreditsPage();
             }
             break;
+        case KeyType::ToggleHard:
+            hardMode = !hardMode;
+            preferences.putUChar("hard", hardMode ? 1 : 0);
+            renderModeMenu();
+            break;
         case KeyType::Undo:
             undoDontWordleGuess();
             break;
@@ -1450,14 +1603,26 @@ void handleInput(const KeyHit& hit) {
             break;
         case KeyType::ChooseWordle:
             gameMode = GameMode::Wordle;
-            snapshots[0].active && hit.row == 0 ? resumeGame() : startNewGame();
+            if (snapshots[0].active && hit.row == 0) {
+                resumeGame();
+            } else {
+                // The bottom strip starts the daily puzzle when no game is
+                // paused; otherwise it discards the paused game.
+                dailyGame = !snapshots[0].active && hit.row == 1;
+                if (dailyGame) {
+                    dailyNumber = dailyCounter[static_cast<uint8_t>(language)];
+                }
+                startNewGame();
+            }
             break;
         case KeyType::ChooseFibble:
             gameMode = GameMode::Fibble;
+            dailyGame = false;
             snapshots[1].active && hit.row == 0 ? resumeGame() : startNewGame();
             break;
         case KeyType::ChooseDontWordle:
             gameMode = GameMode::DontWordle;
+            dailyGame = false;
             snapshots[2].active && hit.row == 0 ? resumeGame() : startNewGame();
             break;
         default:
@@ -1523,6 +1688,9 @@ void pollBluetoothKeyboard() {
 
     uint8_t usage = 0;
     while (xQueueReceive(bluetoothKeyQueue, &usage, 0) == pdTRUE) {
+        if (wakeBacklight()) {
+            continue;
+        }
         if (!modeSelected || gameOver || inspectorOpen) {
             continue;
         }
@@ -1559,6 +1727,9 @@ void pollTouch() {
     if (pressed && touchArmed && millis() - lastTouchMs >= TOUCH_DEBOUNCE_MS) {
         touchArmed = false;
         lastTouchMs = millis();
+        if (wakeBacklight()) {
+            return;  // The waking tap only restores brightness.
+        }
         const uint16_t x = constrain(map(point.x, TOUCH_RAW_X_MIN, TOUCH_RAW_X_MAX,
                                          0, SCREEN_WIDTH - 1), 0, SCREEN_WIDTH - 1);
         const uint16_t y = constrain(map(point.y, TOUCH_RAW_Y_MIN, TOUCH_RAW_Y_MAX,
@@ -1590,6 +1761,10 @@ void setup() {
     }
     pinMode(TFT_BACKLIGHT_PIN, OUTPUT);
     digitalWrite(TFT_BACKLIGHT_PIN, TFT_BACKLIGHT_ON);
+    ledcSetup(0, 5000, 8);
+    ledcAttachPin(TFT_BACKLIGHT_PIN, 0);
+    setBacklight(BACKLIGHT_FULL_LEVEL);
+    lastInteractionMs = millis();
 
     tft.init();
     tft.setRotation(TFT_ROTATION);
@@ -1609,4 +1784,5 @@ void loop() {
     pollTouch();
     pollBluetoothKeyboard();
     pollTopStatus();
+    pollBacklight();
 }
